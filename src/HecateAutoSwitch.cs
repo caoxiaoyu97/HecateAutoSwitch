@@ -215,7 +215,14 @@ namespace HecateAutoSwitch
 
     internal static class SonarRouter
     {
-        private const string BaseUrl = "http://127.0.0.1:8822";
+        private static string baseUrl;
+        private static DateTime baseUrlResolvedAt = DateTime.MinValue;
+        private static readonly Regex RegisteredSonarAddress = new Regex(
+            @"Registered Environment Address:\s*\[SONAR:\s*(http://127\.0\.0\.1:\d+)\]",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+        private static readonly Regex SonarReadyAddress = new Regex(
+            @"""subAppName"":""sonar""[^\r\n]*?""webServerAddress"":""(http://127\.0\.0\.1:\d+)""",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
         public static bool IsRunning()
         {
             Process[] processes = Process.GetProcessesByName("SteelSeriesSonar");
@@ -352,32 +359,112 @@ namespace HecateAutoSwitch
 
         private static string Get(string path)
         {
-            HttpWebRequest request = CreateRequest(path, "GET");
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
-                return reader.ReadToEnd();
+            return SendRequest(path, "GET");
         }
 
         private static string Put(string path)
         {
-            HttpWebRequest request = CreateRequest(path, "PUT");
-            request.ContentLength = 0;
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
-                return reader.ReadToEnd();
+            return SendRequest(path, "PUT");
         }
 
-        private static HttpWebRequest CreateRequest(string path, string method)
+        private static string SendRequest(string path, string method)
         {
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(BaseUrl + path);
-            request.Method = method;
-            request.Proxy = null;
-            request.Timeout = 1200;
-            request.ReadWriteTimeout = 1200;
-            request.KeepAlive = false;
-            request.ServicePoint.Expect100Continue = false;
-            return request;
+            Exception lastError = null;
+            for (int attempt = 0; attempt < 2; attempt++)
+            {
+                try
+                {
+                    string resolvedBase = ResolveBaseUrl(attempt > 0);
+                    HttpWebRequest request = (HttpWebRequest)WebRequest.Create(resolvedBase + path);
+                    request.Method = method;
+                    request.Proxy = null;
+                    request.Timeout = 1000;
+                    request.ReadWriteTimeout = 1000;
+                    request.KeepAlive = false;
+                    request.ServicePoint.Expect100Continue = false;
+                    if (method == "PUT") request.ContentLength = 0;
+                    using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+                    using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+                        return reader.ReadToEnd();
+                }
+                catch (Exception ex)
+                {
+                    lastError = ex;
+                    baseUrl = null;
+                    baseUrlResolvedAt = DateTime.MinValue;
+                }
+            }
+            throw new InvalidOperationException("Sonar 接口连接失败", lastError);
         }
+
+        private static string ResolveBaseUrl(bool forceRefresh)
+        {
+            DateTime now = DateTime.UtcNow;
+            if (!forceRefresh && !String.IsNullOrEmpty(baseUrl) &&
+                (now - baseUrlResolvedAt).TotalSeconds < 8.0)
+                return baseUrl;
+
+            string logPath = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "SteelSeries", "GG", "Logs", "electron-log.txt");
+            if (File.Exists(logPath))
+            {
+                string text = ReadTail(logPath, 512 * 1024);
+                string candidate = LatestSonarUrl(text);
+                if (!String.IsNullOrEmpty(candidate))
+                {
+                    baseUrl = candidate.TrimEnd('/');
+                    baseUrlResolvedAt = now;
+                    return baseUrl;
+                }
+            }
+
+            if (!String.IsNullOrEmpty(baseUrl))
+                return baseUrl;
+            baseUrl = "http://127.0.0.1:8822";
+            baseUrlResolvedAt = now;
+            return baseUrl;
+        }
+
+        private static string LatestSonarUrl(string text)
+        {
+            int latestIndex = -1;
+            string latestUrl = null;
+            foreach (Regex pattern in new[] { RegisteredSonarAddress, SonarReadyAddress })
+            {
+                foreach (Match match in pattern.Matches(text))
+                {
+                    if (match.Index > latestIndex)
+                    {
+                        latestIndex = match.Index;
+                        latestUrl = match.Groups[1].Value;
+                    }
+                }
+            }
+            return latestUrl;
+        }
+
+        private static string ReadTail(string path, int maxBytes)
+        {
+            using (FileStream stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete))
+            {
+                long length = stream.Length;
+                long readLength = Math.Min(length, maxBytes);
+                stream.Seek(length - readLength, SeekOrigin.Begin);
+                byte[] bytes = new byte[readLength];
+                int total = 0;
+                while (total < bytes.Length)
+                {
+                    int read = stream.Read(bytes, total, bytes.Length - total);
+                    if (read <= 0) break;
+                    total += read;
+                }
+                return Encoding.UTF8.GetString(bytes, 0, total);
+            }
+        }
+
     }
 
     internal static class AudioEndpoints

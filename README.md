@@ -27,7 +27,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build.ps1
 
 ### 检测到 SteelSeries Sonar 经典模式
 
-控制器调用 Sonar 本机的 `127.0.0.1:8822` 控制接口：
+控制器从 SteelSeries GG 的 `electron-log.txt` 读取当前 Sonar 本机控制端口，不假定固定端口。Sonar 或 GG 重启后如果端口改变，控制器会自动重新发现：
 
 - 保持 Windows 默认输出为 `SteelSeries Sonar - Gaming`。
 - 耳机在线时把 Sonar 的游戏、聊天、媒体和 Aux 物理输出路由到 HECATE 耳机。

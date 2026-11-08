@@ -73,7 +73,7 @@ Windows IMMNotificationClient 的 OnDeviceStateChanged 反映音频端点状态�
 
 ## Sonar 兼容与控制器实现
 
-本机 SteelSeries Sonar 1.106 在 `http://127.0.0.1:8822` 提供本机控制接口：
+本机 SteelSeries Sonar 1.106 提供本机控制接口。端口由 SteelSeries GG 动态分配，实测曾出现 `8822`、`6183`、`12356` 等值，因此控制器从 `electron-log.txt` 解析当前 `Registered Environment Address: [SONAR: ...]` 地址：
 
 - `GET /mode` 返回 `classic`。
 - `GET /classicRedirections` 返回 game/chat/media/aux 的实际物理输出。
