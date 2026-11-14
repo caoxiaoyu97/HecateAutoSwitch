@@ -25,101 +25,6 @@ namespace HecateAutoSwitch
         public string Reason = String.Empty;
     }
 
-    internal sealed class LogReader
-    {
-        private static readonly Regex StateFrame = new Regex(
-            @"\[(?<time>[^\]]+)\].*?HID\s+read\[64\]:\s*D0\s+35\s+BB\s+0A\s+(?<reserved>[0-9A-Fa-f]{2})\s+(?<online>[0-9A-Fa-f]{2})\s+(?<battery>[0-9A-Fa-f]{2})",
-            RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
-        private string cachedPath;
-        private long cachedLength = -1;
-        private DateTime cachedWriteTime = DateTime.MinValue;
-        private LogSnapshot cachedSnapshot;
-
-        public LogSnapshot ReadToday()
-        {
-            string directory = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "HECATE", "log");
-            string path = Path.Combine(directory, "log_" + DateTime.Now.ToString("yyyyMMdd") + ".log");
-            if (!File.Exists(path))
-                return Unknown("今天的 HECATE 详细日志尚未生成");
-
-            FileInfo info = new FileInfo(path);
-            if (cachedSnapshot != null &&
-                String.Equals(cachedPath, path, StringComparison.OrdinalIgnoreCase) &&
-                cachedLength == info.Length && cachedWriteTime == info.LastWriteTimeUtc)
-            {
-                return cachedSnapshot;
-            }
-
-            string text;
-            using (FileStream stream = new FileStream(
-                path, FileMode.Open, FileAccess.Read,
-                FileShare.ReadWrite | FileShare.Delete))
-            {
-                long length = stream.Length;
-                long readLength = Math.Min(length, 2L * 1024L * 1024L);
-                stream.Seek(length - readLength, SeekOrigin.Begin);
-                byte[] bytes = new byte[readLength];
-                int total = 0;
-                while (total < bytes.Length)
-                {
-                    int read = stream.Read(bytes, total, bytes.Length - total);
-                    if (read <= 0) break;
-                    total += read;
-                }
-                text = Encoding.UTF8.GetString(bytes, 0, total);
-            }
-
-            MatchCollection matches = StateFrame.Matches(text);
-            if (matches.Count == 0)
-            {
-                LogSnapshot missing = Unknown("日志中没有找到耳机状态帧");
-                missing.FileName = info.Name;
-                Cache(path, info, missing);
-                return missing;
-            }
-
-            Match match = matches[matches.Count - 1];
-            int onlineByte = Convert.ToInt32(match.Groups["online"].Value, 16);
-            LogSnapshot result = new LogSnapshot();
-            result.Timestamp = match.Groups["time"].Value.Trim();
-            result.FileName = info.Name;
-            if (onlineByte == 1)
-            {
-                result.State = LogState.Online;
-                result.Battery = Convert.ToInt32(match.Groups["battery"].Value, 16);
-            }
-            else if (onlineByte == 0)
-            {
-                result.State = LogState.Offline;
-            }
-            else
-            {
-                result.State = LogState.Unknown;
-                result.Reason = "状态帧格式尚未识别";
-            }
-            Cache(path, info, result);
-            return result;
-        }
-
-        private void Cache(string path, FileInfo info, LogSnapshot snapshot)
-        {
-            cachedPath = path;
-            cachedLength = info.Length;
-            cachedWriteTime = info.LastWriteTimeUtc;
-            cachedSnapshot = snapshot;
-        }
-
-        private static LogSnapshot Unknown(string reason)
-        {
-            LogSnapshot result = new LogSnapshot();
-            result.Reason = reason;
-            return result;
-        }
-    }
-
     internal enum EDataFlow { eRender = 0, eCapture = 1, eAll = 2 }
     internal enum ERole { eConsole = 0, eMultimedia = 1, eCommunications = 2 }
     [Flags] internal enum DeviceState { Active = 1, Disabled = 2, NotPresent = 4, Unplugged = 8, All = 15 }
@@ -655,7 +560,7 @@ namespace HecateAutoSwitch
 
     internal sealed class MainForm : Form
     {
-        private readonly LogReader logReader = new LogReader();
+        private bool readingReceiver;
         private readonly System.Windows.Forms.Timer monitorTimer = new System.Windows.Forms.Timer();
         private readonly System.Windows.Forms.Timer refreshTimer = new System.Windows.Forms.Timer();
         private readonly NotifyIcon tray;
@@ -684,14 +589,14 @@ namespace HecateAutoSwitch
         private DateTime lastRoutingCheck = DateTime.MinValue;
         private DateTime candidateSince = DateTime.UtcNow;
         private DateTime nextAutoAttempt = DateTime.MinValue;
-        private LogSnapshot lastSnapshot;
+
         private AudioTargets targets;
         private DeviceInfo currentDefault;
         private DeviceInfo currentCapture;
         private DeviceInfo lastFallbackRender;
         private DeviceInfo lastFallbackCapture;
         private bool exiting;
-        private bool logFooterInitialized;
+
 
         [DllImport("user32.dll")]
         private static extern bool SetProcessDPIAware();
@@ -751,7 +656,7 @@ namespace HecateAutoSwitch
             card.Controls.Add(stateLabel);
 
             detailLabel = new Label();
-            detailLabel.Text = "等待 HECATE 详细日志";
+            detailLabel.Text = "等待读取 2.4G 接收器";
             detailLabel.ForeColor = Color.FromArgb(190, 202, 210);
             detailLabel.AutoSize = true;
             detailLabel.Location = new Point(20, 55);
@@ -860,7 +765,7 @@ namespace HecateAutoSwitch
             Resize += delegate { if (WindowState == FormWindowState.Minimized) HideToTray(); };
             Shown += delegate { RefreshDeviceTargets(); };
 
-            monitorTimer.Interval = 500;
+            monitorTimer.Interval = 1000;
             monitorTimer.Tick += delegate { PollStatus(); };
             monitorTimer.Start();
 
@@ -882,31 +787,24 @@ namespace HecateAutoSwitch
             return button;
         }
 
-        private void PollStatus()
+        private async void PollStatus()
         {
+            if (readingReceiver) return;
+            readingReceiver = true;
             try
             {
-                LogSnapshot snapshot;
+                var snapshot = await System.Threading.Tasks.Task.Run(() => ReceiverStatus.Read());
+                if (exiting) return;
                 RefreshRoutingMode();
-                if (!IsHecateRunning())
-                {
-                    snapshot = new LogSnapshot
-                    {
-                        State = LogState.Unknown,
-                        Reason = "HECATE 软件未运行"
-                    };
-                }
-                else
-                {
-                    snapshot = logReader.ReadToday();
-                }
-                lastSnapshot = snapshot;
                 UpdateState(snapshot);
             }
             catch (Exception ex)
             {
-                SetUnknown("读取失败：" + ex.Message);
+                if (!exiting) UpdateState(new LogSnapshot {
+                    Reason = "读取失败：" + ex.GetBaseException().Message
+                });
             }
+            finally { readingReceiver = false; }
         }
 
         private void UpdateState(LogSnapshot snapshot)
@@ -925,6 +823,7 @@ namespace HecateAutoSwitch
 
             if (snapshot.State == LogState.Unknown)
             {
+                stableState = LogState.Unknown;
                 SetUnknown(snapshot.Reason);
             }
             else if (stableState != snapshot.State)
@@ -950,13 +849,7 @@ namespace HecateAutoSwitch
                 detailLabel.Text = "2.4G 未连接 · " + snapshot.Timestamp;
             }
 
-            if (snapshot.FileName.Length > 0 && !logFooterInitialized)
-            {
-                footerLabel.Text = snapshot.FileName + " · 只读监听";
-                logFooterInitialized = true;
-            }
-
-            if (autoCheck.Checked && stableState != LogState.Unknown &&
+            if (autoCheck.Checked && snapshot.State != LogState.Unknown && snapshot.State == stableState &&
                 routingMode != RoutingMode.Unknown &&
                 (appliedState != stableState || appliedRoutingMode != routingMode) &&
                 now >= nextAutoAttempt)
@@ -975,7 +868,7 @@ namespace HecateAutoSwitch
         {
             stateLabel.Text = "●  状态未知";
             stateLabel.ForeColor = Color.FromArgb(151, 164, 173);
-            detailLabel.Text = String.IsNullOrEmpty(reason) ? "等待官方日志中的状态帧" : reason;
+            detailLabel.Text = String.IsNullOrEmpty(reason) ? "等待接收器状态" : reason;
         }
 
         private bool ApplyState(LogState state, bool automatic)
@@ -1207,13 +1100,6 @@ namespace HecateAutoSwitch
                 currentLabel.Text = "当前输出：读取失败";
                 captureLabel.Text = "录音默认：读取失败";
             }
-        }
-
-        private static bool IsHecateRunning()
-        {
-            Process[] processes = Process.GetProcessesByName("HECATE");
-            try { return processes.Length > 0; }
-            finally { foreach (Process process in processes) process.Dispose(); }
         }
 
         private void OnClosing(object sender, FormClosingEventArgs e)

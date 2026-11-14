@@ -5,7 +5,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
-$source = Join-Path $root 'src\HecateAutoSwitch.cs'
+$source = @(Get-ChildItem (Join-Path $root 'src') -Filter *.cs | Select-Object -ExpandProperty FullName)
 $icon = Join-Path $root 'assets\hecate.ico'
 
 if (-not (Test-Path $compiler)) {
@@ -25,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
     /r:System.Windows.Forms.dll `
     /r:System.Drawing.dll `
     /r:System.Web.Extensions.dll `
-    $source
+    @source
 
 if ($LASTEXITCODE -ne 0) {
     throw "Compilation failed with exit code $LASTEXITCODE"
